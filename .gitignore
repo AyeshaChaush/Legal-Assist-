@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Large downloaded data (re-downloadable via setup_datasets.py)
+data/models/
+data/judgments/
+data/raw_pdfs/
+
+# User chat history (private, regenerated at runtime)
+data/chat_history.json
+
+# Test documents
+test/
