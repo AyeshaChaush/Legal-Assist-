@@ -314,7 +314,7 @@ def render_qa():
             st.write(question)
         with st.chat_message("assistant"):
             with st.spinner("Searching legal sources and generating an answer..."):
-                jur = None if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select
+                jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
                 retrieved = retrieve_general_law(question, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
                 prompt = build_general_prompt(question, retrieved)
                 raw_answer = ask_llm(prompt, groq_client, max_tokens=1500)
@@ -439,7 +439,7 @@ def render_doc():
                         doc_question, st.session_state.doc_clauses,
                         st.session_state.doc_embeddings, embed_model
                     )
-                    jur = None if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select
+                    jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
                     retrieved_law_results = retrieve_law(doc_question, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
                     prompt = build_combined_prompt(doc_question, retrieved_clauses, retrieved_law_results)
                     raw_answer = ask_llm(prompt, groq_client, max_tokens=2048)
