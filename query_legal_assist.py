@@ -133,10 +133,16 @@ def retrieve(question, index, chunks, embed_model, top_k=TOP_K, jurisdiction_fil
 def build_prompt(question, retrieved_chunks):
     context_blocks = []
     for i, c in enumerate(retrieved_chunks, start=1):
-        context_blocks.append(
-            f"[Source {i}] {c['act_name']}, Section {c['number']} "
-            f"({c['title']}):\n{c['text']}"
-        )
+        if c.get("chunk_type") == "judgment":
+            # Case law: cite as a case, not a statute section
+            context_blocks.append(
+                f"[Source {i} - Court Judgment] {c['act_name']} ({c['title']}):\n{c['text']}"
+            )
+        else:
+            context_blocks.append(
+                f"[Source {i} - Statute] {c['act_name']}, Section {c['number']} "
+                f"({c['title']}):\n{c['text']}"
+            )
     context_text = "\n\n".join(context_blocks)
 
     prompt = f"""You are a legal information assistant for Indian law. Answer the user's
@@ -149,7 +155,11 @@ ANSWER STRUCTURE:
 - Then add supporting detail/citations if useful.
 
 RULES:
-- Always cite the Act name and section number for every claim, like: (BSA 2023, Section 118)
+- For statute sources, always cite the Act name and section number, like: (BSA 2023, Section 118)
+- For court judgment sources, cite the case name, like: (Case: [case name])
+- Be clear about the difference between what a statute says and how a court has
+  interpreted or applied it in a specific case -- don't blend the two together
+  as if they were the same kind of authority
 - If the sources do not contain enough information to answer, say so clearly in the
   first sentence.
 - Explain the answer in simple, plain language a non-lawyer can understand.

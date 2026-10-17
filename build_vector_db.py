@@ -23,8 +23,18 @@ from sentence_transformers import SentenceTransformer
 # SETTINGS
 # ---------------------------------------------------------
 CLEANED_DIR = Path("data/statutes/cleaned")
+JUDGMENTS_DIR = Path("data/judgments")
 VECTOR_DB_DIR = Path("data/vector_db")
 VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
+
+# Judgment datasets (IL-PCSR, OpenNyAI, etc.) contain thousands of cases, many
+# with very long full-text. For this project's scale, we sample a bounded
+# number per source and truncate each judgment's text -- this keeps build
+# time and index size reasonable while still giving genuine case-law coverage.
+# This is a deliberate scoping decision, not a hidden limitation.
+MAX_JUDGMENTS_PER_SOURCE = 800  # increased from 500 for better topic coverage
+JUDGMENT_TEXT_MAX_CHARS = 3000
+JUDGMENT_SAMPLE_SEED = 42  # fixed seed -- reproducible, but not just "the first N rows"
 
 # Model choice: starting with a lightweight general-purpose model.
 # You can swap this later for InLegalBERT for better legal-domain accuracy.
@@ -85,6 +95,7 @@ def load_all_chunks():
                 "title": section.get("section_title") or section.get("title", ""),
                 "text": section.get("text", ""),
                 "jurisdiction": detect_jurisdiction(act_name),
+                "chunk_type": "statute",
             }
             if chunk["text"].strip():  # skip empty entries
                 all_chunks.append(chunk)
@@ -93,6 +104,100 @@ def load_all_chunks():
     print(f"Loaded {len(all_chunks)} total chunks from {len(json_files)} file(s).")
     print(f"Jurisdictions detected: {jurisdictions_found}")
     return all_chunks
+
+
+# ---------------------------------------------------------
+# STEP 1b: Load judgment/case-law datasets and convert to the same
+# chunk schema as statutes, tagged chunk_type="judgment" so they stay
+# distinguishable in citations and prompts.
+# ---------------------------------------------------------
+def truncate_text(text, max_chars=JUDGMENT_TEXT_MAX_CHARS):
+    if not text:
+        return ""
+    text = str(text)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0] + "..."
+
+
+def load_il_pcsr_chunks():
+    """IL-PCSR: Supreme Court cases with links to relevant statutes and precedents."""
+    chunks = []
+    path = JUDGMENTS_DIR / "il-pcsr"
+    if not path.exists():
+        print(f"  [skip] IL-PCSR not found at {path}")
+        return chunks
+    try:
+        from datasets import load_from_disk
+        ds = load_from_disk(str(path))
+        split = ds["train_queries"] if "train_queries" in ds else list(ds.values())[0]
+        sample = split.shuffle(seed=JUDGMENT_SAMPLE_SEED).select(range(min(MAX_JUDGMENTS_PER_SOURCE, len(split))))  # random sample, not just the first N rows
+
+        for row in sample:
+            case_title = (row.get("case_title") or "").strip()
+            text = truncate_text(row.get("text", ""))
+            if not text.strip() or not case_title:  # skip blank titles too
+                continue
+            chunks.append({
+                "source_file": "il-pcsr",
+                "act_name": case_title,
+                "number": row.get("id", "N/A"),
+                "title": f"Case ({row.get('date', 'date unknown')})",
+                "text": text,
+                "jurisdiction": row.get("jurisdiction") or "Central",
+                "chunk_type": "judgment",
+            })
+        print(f"  [ok] IL-PCSR: loaded {len(chunks)} case chunks")
+    except Exception as e:
+        print(f"  [FAIL] Could not load IL-PCSR: {e}")
+    return chunks
+
+
+def load_opennyai_chunks():
+    """OpenNyAI: categorized Indian court judgments with court/case-type metadata."""
+    chunks = []
+    path = JUDGMENTS_DIR / "opennyai"
+    if not path.exists():
+        print(f"  [skip] OpenNyAI not found at {path}")
+        return chunks
+    try:
+        from datasets import load_from_disk
+        ds = load_from_disk(str(path))
+        split = ds["train"] if "train" in ds else list(ds.values())[0]
+        sample = split.shuffle(seed=JUDGMENT_SAMPLE_SEED).select(range(min(MAX_JUDGMENTS_PER_SOURCE, len(split))))  # random sample, not just the first N rows
+
+        for row in sample:
+            title = (row.get("Titles") or "").strip()
+            text = truncate_text(row.get("Text", ""))
+            if not text.strip() or not title:  # skip blank titles too
+                continue
+            court = row.get("Court_Name_Normalized") or row.get("Court_Name") or "Court unknown"
+            case_type = row.get("Case_Type", "")
+            chunks.append({
+                "source_file": "opennyai",
+                "act_name": title,
+                "number": "N/A",
+                "title": f"{court}{' - ' + case_type if case_type else ''}",
+                "text": text,
+                "jurisdiction": "Central",  # OpenNyAI doesn't provide a clean state field
+                "chunk_type": "judgment",
+            })
+        print(f"  [ok] OpenNyAI: loaded {len(chunks)} case chunks")
+    except Exception as e:
+        print(f"  [FAIL] Could not load OpenNyAI: {e}")
+    return chunks
+
+
+def load_judgment_chunks():
+    print("\nLoading judgment/case-law datasets...")
+    print(f"(Sampling up to {MAX_JUDGMENTS_PER_SOURCE} cases per source, "
+          f"truncating each to {JUDGMENT_TEXT_MAX_CHARS} characters -- see "
+          f"settings at the top of this file to adjust.)")
+    all_judgment_chunks = []
+    all_judgment_chunks.extend(load_il_pcsr_chunks())
+    all_judgment_chunks.extend(load_opennyai_chunks())
+    print(f"Total judgment chunks loaded: {len(all_judgment_chunks)}\n")
+    return all_judgment_chunks
 
 
 # ---------------------------------------------------------
@@ -137,8 +242,15 @@ def build_faiss_index(embeddings):
 # MAIN
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    # 1. Load all chunks from your cleaned JSON files
-    chunks = load_all_chunks()
+    # 1. Load all chunks from your cleaned statute JSON files
+    statute_chunks = load_all_chunks()
+
+    # 1b. Load judgment/case-law chunks (IL-PCSR, OpenNyAI) and merge them in
+    judgment_chunks = load_judgment_chunks()
+
+    chunks = statute_chunks + judgment_chunks
+    print(f"Combined total: {len(statute_chunks)} statute chunks + "
+          f"{len(judgment_chunks)} judgment chunks = {len(chunks)} chunks\n")
 
     if not chunks:
         print("Nothing to embed. Exiting.")

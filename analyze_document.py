@@ -174,7 +174,9 @@ def build_combined_prompt(question, retrieved_clauses, retrieved_law):
         for c in retrieved_clauses
     )
     law_blocks = "\n\n".join(
-        f"[Relevant Law - {l['act_name']}, Section {l['number']} ({l['title']})]:\n{l['text']}"
+        (f"[Court Judgment - {l['act_name']} ({l['title']})]:\n{l['text']}"
+         if l.get("chunk_type") == "judgment" else
+         f"[Relevant Law - {l['act_name']}, Section {l['number']} ({l['title']})]:\n{l['text']}")
         for l in retrieved_law
     )
 

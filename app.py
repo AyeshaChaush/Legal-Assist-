@@ -127,6 +127,13 @@ def clean_answer_text(text):
     return html.unescape(text)
 
 
+def format_source_line(s):
+    """Formats one retrieved source for display -- statute citation vs case judgment."""
+    if s.get("chunk_type") == "judgment":
+        return f"- **{s['act_name']}** *(Court Judgment)* -- {s['title']}"
+    return f"- **{s['act_name']}**, Section {s['number']}: {s['title']}"
+
+
 # ---------------------------------------------------------
 # CACHED RESOURCE LOADING (runs once, not on every interaction)
 # ---------------------------------------------------------
@@ -306,7 +313,7 @@ def render_qa():
             if entry["sources"]:
                 with st.expander(f"Sources ({len(entry['sources'])})"):
                     for s in entry["sources"]:
-                        st.markdown(f"- **{s['act_name']}**, Section {s['number']}: {s['title']}")
+                        st.markdown(format_source_line(s))
 
     question = st.chat_input("Ask about Indian law...")
     if question:
@@ -323,7 +330,7 @@ def render_qa():
             if retrieved:
                 with st.expander(f"Sources ({len(retrieved)})"):
                     for s in retrieved:
-                        st.markdown(f"- **{s['act_name']}**, Section {s['number']}: {s['title']}")
+                        st.markdown(format_source_line(s))
 
         st.session_state.qa_history.append(
             {"question": question, "answer": answer, "sources": retrieved}
