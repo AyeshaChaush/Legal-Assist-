@@ -43,6 +43,11 @@ from query_legal_assist import (
     retrieve as retrieve_general_law,
     build_prompt as build_general_prompt,
 )
+from translation_utils import (
+    SUPPORTED_LANGUAGES,
+    translate_to_english,
+    translate_from_english,
+)
 
 # ---------------------------------------------------------
 # PAGE CONFIG
@@ -211,6 +216,20 @@ with st.sidebar:
     )
 
     st.divider()
+    st.markdown("**Language**")
+    st.selectbox(
+        "Choose your language",
+        list(SUPPORTED_LANGUAGES.keys()),
+        label_visibility="collapsed",
+        key="language_select",
+    )
+    st.caption(
+        "Ask and receive answers in your chosen language. Retrieval and "
+        "legal reasoning always happen in English internally, then the "
+        "question and answer are translated at the edges."
+    )
+
+    st.divider()
     if st.session_state.logged_in_as:
         st.success(f"Signed in as **{st.session_state.logged_in_as}**")
         if st.button("Log Out", use_container_width=True):
@@ -320,17 +339,30 @@ def render_qa():
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"):
-            with st.spinner("Searching legal sources and generating an answer..."):
-                jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
-                retrieved = retrieve_general_law(question, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
-                prompt = build_general_prompt(question, retrieved)
-                raw_answer = ask_llm(prompt, groq_client, max_tokens=1500)
-                answer = clean_answer_text(raw_answer)
-            st.markdown(answer)
-            if retrieved:
-                with st.expander(f"Sources ({len(retrieved)})"):
-                    for s in retrieved:
-                        st.markdown(format_source_line(s))
+            lang_code = SUPPORTED_LANGUAGES[st.session_state.language_select]
+            retrieved = []
+            try:
+                with st.spinner("Searching legal sources and generating an answer..."):
+                    # Translate the question to English before it enters the pipeline.
+                    # Retrieval and the LLM always operate in English internally.
+                    question_en = translate_to_english(question, lang_code)
+
+                    jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
+                    retrieved = retrieve_general_law(question_en, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
+                    prompt = build_general_prompt(question_en, retrieved)
+                    raw_answer = ask_llm(prompt, groq_client, max_tokens=1500)
+                    answer_en = clean_answer_text(raw_answer)
+
+                    # Translate the finished English answer into the user's chosen language.
+                    answer = translate_from_english(answer_en, lang_code)
+                st.markdown(answer)
+                if retrieved:
+                    with st.expander(f"Sources ({len(retrieved)})"):
+                        for s in retrieved:
+                            st.markdown(format_source_line(s))
+            except RuntimeError as e:
+                answer = f"⚠️ {e}"
+                st.error(answer)
 
         st.session_state.qa_history.append(
             {"question": question, "answer": answer, "sources": retrieved}
@@ -441,25 +473,37 @@ def render_doc():
             with st.chat_message("user"):
                 st.write(doc_question)
             with st.chat_message("assistant"):
-                with st.spinner("Checking your document and relevant law..."):
-                    retrieved_clauses = retrieve_clauses(
-                        doc_question, st.session_state.doc_clauses,
-                        st.session_state.doc_embeddings, embed_model
-                    )
-                    jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
-                    retrieved_law_results = retrieve_law(doc_question, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
-                    prompt = build_combined_prompt(doc_question, retrieved_clauses, retrieved_law_results)
-                    raw_answer = ask_llm(prompt, groq_client, max_tokens=2048)
-                    answer = clean_answer_text(raw_answer)
-                st.markdown(answer)
+                lang_code = SUPPORTED_LANGUAGES[st.session_state.language_select]
+                translation_failed = False
+                try:
+                    with st.spinner("Checking your document and relevant law..."):
+                        doc_question_en = translate_to_english(doc_question, lang_code)
 
-            doc_name = st.session_state.doc_name
-            if doc_name not in st.session_state.doc_qa_history_by_doc:
-                st.session_state.doc_qa_history_by_doc[doc_name] = []
-            st.session_state.doc_qa_history_by_doc[doc_name].append(
-                {"question": doc_question, "answer": answer}
-            )
-            save_chat_history()
+                        retrieved_clauses = retrieve_clauses(
+                            doc_question_en, st.session_state.doc_clauses,
+                            st.session_state.doc_embeddings, embed_model
+                        )
+                        jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
+                        retrieved_law_results = retrieve_law(doc_question_en, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
+                        prompt = build_combined_prompt(doc_question_en, retrieved_clauses, retrieved_law_results)
+                        raw_answer = ask_llm(prompt, groq_client, max_tokens=2048)
+                        answer_en = clean_answer_text(raw_answer)
+
+                        answer = translate_from_english(answer_en, lang_code)
+                    st.markdown(answer)
+                except RuntimeError as e:
+                    translation_failed = True
+                    answer = f"⚠️ {e}"
+                    st.error(answer)
+
+            if not translation_failed:
+                doc_name = st.session_state.doc_name
+                if doc_name not in st.session_state.doc_qa_history_by_doc:
+                    st.session_state.doc_qa_history_by_doc[doc_name] = []
+                st.session_state.doc_qa_history_by_doc[doc_name].append(
+                    {"question": doc_question, "answer": answer}
+                )
+                save_chat_history()
 
     elif not st.session_state.doc_clauses:
         st.info("Upload a PDF above to get started.")
