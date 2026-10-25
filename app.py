@@ -345,7 +345,7 @@ def render_qa():
                 with st.spinner("Searching legal sources and generating an answer..."):
                     # Translate the question to English before it enters the pipeline.
                     # Retrieval and the LLM always operate in English internally.
-                    question_en = translate_to_english(question, lang_code)
+                    question_en = translate_to_english(question, lang_code, groq_client)
 
                     jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
                     retrieved = retrieve_general_law(question_en, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
@@ -354,7 +354,7 @@ def render_qa():
                     answer_en = clean_answer_text(raw_answer)
 
                     # Translate the finished English answer into the user's chosen language.
-                    answer = translate_from_english(answer_en, lang_code)
+                    answer = translate_from_english(answer_en, lang_code, groq_client)
                 st.markdown(answer)
                 if retrieved:
                     with st.expander(f"Sources ({len(retrieved)})"):
@@ -477,7 +477,7 @@ def render_doc():
                 translation_failed = False
                 try:
                     with st.spinner("Checking your document and relevant law..."):
-                        doc_question_en = translate_to_english(doc_question, lang_code)
+                        doc_question_en = translate_to_english(doc_question, lang_code, groq_client)
 
                         retrieved_clauses = retrieve_clauses(
                             doc_question_en, st.session_state.doc_clauses,
@@ -489,7 +489,7 @@ def render_doc():
                         raw_answer = ask_llm(prompt, groq_client, max_tokens=2048)
                         answer_en = clean_answer_text(raw_answer)
 
-                        answer = translate_from_english(answer_en, lang_code)
+                        answer = translate_from_english(answer_en, lang_code, groq_client)
                     st.markdown(answer)
                 except RuntimeError as e:
                     translation_failed = True

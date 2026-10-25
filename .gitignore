@@ -13,3 +13,7 @@ data/chat_history.json
 
 # Test documents
 test/
+
+data/app.db
+data/secure_uploads/
+data/user_chats/
