@@ -262,6 +262,38 @@ def load_document(user_id: int, doc_id: str) -> bytes:
     return data
 
 
+def _review_path(user_id: int, doc_id: str) -> Path:
+    return UPLOAD_DIR / str(user_id) / f"{doc_id}.review.enc"
+
+
+def _owns(user_id: int, doc_id: str) -> bool:
+    with _conn() as c:
+        return c.execute(
+            "SELECT 1 FROM documents WHERE id=? AND user_id=?", (doc_id, user_id)
+        ).fetchone() is not None
+
+
+def save_review(user_id: int, doc_id: str, review: dict):
+    """Stores a document's review results, encrypted, next to the document."""
+    if not _owns(user_id, doc_id):
+        raise PermissionError("Document not found or not yours.")
+    blob = json.dumps(review, ensure_ascii=False).encode("utf-8")
+    _review_path(user_id, doc_id).write_bytes(encrypt_bytes(blob, user_id))
+
+
+def load_review(user_id: int, doc_id: str):
+    """Returns the saved review dict, or None if absent / not yours / unreadable."""
+    if not _owns(user_id, doc_id):
+        return None
+    p = _review_path(user_id, doc_id)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(decrypt_bytes(p.read_bytes(), user_id).decode("utf-8"))
+    except Exception:
+        return None
+
+
 def delete_document(user_id: int, doc_id: str) -> bool:
     with _conn() as c:
         row = c.execute(
@@ -270,6 +302,7 @@ def delete_document(user_id: int, doc_id: str) -> bool:
         if not row:
             return False
         Path(row["path"]).unlink(missing_ok=True)
+        _review_path(user_id, doc_id).unlink(missing_ok=True)
         c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     return True
 

@@ -57,6 +57,20 @@ with sqlite3.connect(su.DB_PATH) as c:
     c.execute("UPDATE documents SET uploaded_at=? WHERE id=?", (int(time.time()) - 10*86400, d2))
 assert su.purge_expired(7) == 1 and su.list_documents(ub["id"]) == []
 
+# saved reviews
+d3 = su.store_document(ub["id"], "e.pdf", b"third doc")
+review = {"results": ["r1", "r2"], "missing": "m"}
+su.save_review(ub["id"], d3, review)
+assert su.load_review(ub["id"], d3) == review
+assert su.load_review(ua["id"], d3) is None            # other user cannot read it
+try:
+    su.save_review(ua["id"], d3, review); raise SystemExit("review isolation FAILED")
+except PermissionError:
+    pass
+assert b"r1" not in next(Path("data/secure_uploads").rglob("*.review.enc")).read_bytes()
+assert su.delete_document(ub["id"], d3)
+assert not list(Path("data/secure_uploads").rglob("*.review.enc"))   # review removed with its document
+
 # chat + erasure
 su.save_user_chat(ua["id"], {"qa_history": [{"question": "q"}], "doc_qa_history": {}})
 assert su.load_user_chat(ua["id"])["qa_history"][0]["question"] == "q"

@@ -19,9 +19,12 @@ This sets the color theme -- without it, the app still works, just with
 default Streamlit styling instead of the intended navy/blue theme.
 """
 
+import io
 import re
 import json
 import html
+import time
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -197,6 +200,10 @@ if "user" not in st.session_state:
     st.session_state.user = None
 if "token" not in st.session_state:
     st.session_state.token = None
+if "doc_id" not in st.session_state:
+    st.session_state.doc_id = None
+if "last_upload_sig" not in st.session_state:
+    st.session_state.last_upload_sig = None
 
 
 def go_to(page_name):
@@ -217,6 +224,7 @@ def reset_doc_state():
     st.session_state.doc_review_done = False
     st.session_state.doc_review_results = []
     st.session_state.doc_missing_report = ""
+    st.session_state.doc_id = None
 
 
 def start_session(user):
@@ -227,6 +235,7 @@ def start_session(user):
     st.session_state.qa_history = saved["qa_history"]
     st.session_state.doc_qa_history_by_doc = saved["doc_qa_history"]
     reset_doc_state()
+    st.session_state.last_upload_sig = None
 
 
 def end_session():
@@ -236,6 +245,7 @@ def end_session():
     st.session_state.qa_history = []
     st.session_state.doc_qa_history_by_doc = {}
     reset_doc_state()
+    st.session_state.last_upload_sig = None
     st.session_state.page = "welcome"
 
 
@@ -501,6 +511,71 @@ def parse_risk_counts(review_texts):
     return counts
 
 
+def open_saved_document(doc_id):
+    """Decrypts a saved PDF, rebuilds its clauses, and restores any saved review."""
+    user = st.session_state.user
+    try:
+        data = su.load_document(user["id"], doc_id)
+    except Exception as e:
+        st.error(f"Could not open this document: {e}")
+        return False
+
+    name = next((d["original_name"] for d in su.list_documents(user["id"]) if d["id"] == doc_id), "document.pdf")
+    with st.spinner("Opening your saved document..."):
+        raw_text = extract_text_from_pdf(io.BytesIO(data))
+        clauses = split_into_clauses(raw_text)
+        clause_embeddings = embed_clauses(clauses, embed_model)
+
+    reset_doc_state()
+    st.session_state.doc_name = name
+    st.session_state.doc_id = doc_id
+    st.session_state.doc_clauses = clauses
+    st.session_state.doc_embeddings = clause_embeddings
+
+    review = su.load_review(user["id"], doc_id)
+    if review:
+        st.session_state.doc_review_results = review.get("results", [])
+        st.session_state.doc_missing_report = review.get("missing", "")
+        st.session_state.doc_review_done = True
+    return True
+
+
+def render_saved_documents():
+    user = st.session_state.user
+    if not user:
+        return
+    docs = su.list_documents(user["id"])
+    if not docs:
+        return
+    by_id = {d["id"]: d for d in docs}
+
+    def label(doc_id):
+        d = by_id[doc_id]
+        age_days = int((time.time() - d["uploaded_at"]) / 86400)
+        left = max(0, su.DEFAULT_RETENTION_DAYS - age_days)
+        when = datetime.fromtimestamp(d["uploaded_at"]).strftime("%d %b %Y")
+        return f"{d['original_name']}  |  uploaded {when}  |  {left} day(s) left"
+
+    with st.expander(f"My saved documents ({len(docs)})", expanded=not st.session_state.doc_clauses):
+        chosen = st.selectbox("Choose a document", list(by_id), format_func=label, key="saved_doc_select")
+        c1, c2 = st.columns(2)
+        if c1.button("Open", use_container_width=True, key="open_saved_btn"):
+            if open_saved_document(chosen):
+                st.rerun()
+        if c2.button("Delete", use_container_width=True, key="delete_saved_btn"):
+            name = by_id[chosen]["original_name"]
+            su.delete_document(user["id"], chosen)
+            st.session_state.doc_qa_history_by_doc.pop(name, None)
+            save_chat_history()
+            if st.session_state.doc_id == chosen:
+                reset_doc_state()
+            st.rerun()
+        st.caption(
+            "Saved documents and their reviews are encrypted and removed automatically "
+            f"after {su.DEFAULT_RETENTION_DAYS} days."
+        )
+
+
 def render_doc():
     st.markdown("# Analyze My Document")
     st.caption("Upload a contract or agreement. Legal Assist+ reviews it clause by clause.")
@@ -513,12 +588,17 @@ def render_doc():
     else:
         st.caption("Guest mode: your document is processed in memory and never saved.")
 
+    render_saved_documents()
+
     uploaded_file = st.file_uploader("Upload a PDF document", type=["pdf"])
 
-    if uploaded_file and uploaded_file.name != st.session_state.doc_name:
+    upload_sig = (uploaded_file.name, uploaded_file.size) if uploaded_file else None
+    if uploaded_file and upload_sig != st.session_state.last_upload_sig:
+        st.session_state.last_upload_sig = upload_sig
         file_bytes = uploaded_file.getvalue()
+        new_doc_id = None
         if st.session_state.user:
-            su.store_document(st.session_state.user["id"], uploaded_file.name, file_bytes)
+            new_doc_id = su.store_document(st.session_state.user["id"], uploaded_file.name, file_bytes)
         uploaded_file.seek(0)
         with st.spinner("Extracting and splitting your document into clauses..."):
             raw_text = extract_text_from_pdf(uploaded_file)
@@ -526,6 +606,7 @@ def render_doc():
             clause_embeddings = embed_clauses(clauses, embed_model)
 
         st.session_state.doc_name = uploaded_file.name
+        st.session_state.doc_id = new_doc_id
         st.session_state.doc_clauses = clauses
         st.session_state.doc_embeddings = clause_embeddings
         st.session_state.doc_review_done = False
@@ -556,6 +637,11 @@ def render_doc():
             st.session_state.doc_review_results = results
             st.session_state.doc_missing_report = missing_report
             st.session_state.doc_review_done = True
+            if st.session_state.user and st.session_state.doc_id:
+                su.save_review(
+                    st.session_state.user["id"], st.session_state.doc_id,
+                    {"results": results, "missing": missing_report},
+                )
             progress.empty()
             st.rerun()
 
