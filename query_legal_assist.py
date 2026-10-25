@@ -15,6 +15,7 @@ Run with:
 """
 
 import pickle
+import re
 from pathlib import Path
 
 import faiss
@@ -32,6 +33,64 @@ GROQ_MODEL = "openai/gpt-oss-20b"     # confirmed available on this account; swa
 TOP_K = 5  # how many chunks to retrieve per question
 DISTANCE_THRESHOLD = 1.0  # FINAL VALUE -- calibrated from real test data: genuine matches scored 0.35-0.72,
                             # weak/no-match cases scored 0.86-1.03. This threshold reliably separates them.
+
+# --- Act-overview mode: for questions like "explain the IT Act" -----------------
+OVERVIEW_TOP_K = 8          # sections gathered for an overview
+OVERVIEW_CHUNK_CHARS = 1200  # trim each section so the prompt stays within rate limits
+
+# alias phrase (lowercase) -> text that must appear in the Act's name in the index
+ACT_ALIASES = {
+    "information technology act": "information technology",
+    "it act": "information technology",
+    "cyber law": "information technology",
+    "cyber crime act": "information technology",
+    "women rights act": "domestic violence",
+    "women protection act": "domestic violence",
+    "domestic violence act": "domestic violence",
+    "dv act": "domestic violence",
+    "pwdva": "domestic violence",
+    "consumer protection act": "consumer protection",
+    "consumer act": "consumer protection",
+    "motor vehicles act": "motor vehicles",
+    "mv act": "motor vehicles",
+    "indian contract act": "contract act",
+    "contract act": "contract act",
+    "negotiable instruments act": "negotiable instruments",
+    "ni act": "negotiable instruments",
+    "cheque bounce act": "negotiable instruments",
+    "pocso act": "protection of children",
+    "pocso": "protection of children",
+    "hindu marriage act": "hindu marriage",
+    "right to information act": "right to information",
+    "rti act": "right to information",
+    "rti": "right to information",
+    "rent control act": "rent control",
+    "land revenue code": "land revenue",
+    "payment and settlement systems act": "payment and settlement",
+    "bharatiya nyaya sanhita": "bharatiya nyaya",
+    "bns": "bharatiya nyaya",
+    "bharatiya nagarik suraksha sanhita": "bharatiya nagarik",
+    "bnss": "bharatiya nagarik",
+    "bharatiya sakshya adhiniyam": "bharatiya sakshya",
+    "bsa": "bharatiya sakshya",
+    "indian penal code": "penal code",
+    "ipc": "penal code",
+    "code of criminal procedure": "criminal procedure",
+    "crpc": "criminal procedure",
+    "indian evidence act": "evidence act",
+    "evidence act": "evidence act",
+    "constitution of india": "constitution of india",
+    "constitution": "constitution of india",
+}
+
+OVERVIEW_INTENT = re.compile(
+    r"^(please\s+)?(give me an? (overview|summary) of|explain|summari[sz]e|overview of|overview|"
+    r"describe|tell me about|what is|what are|about)\b"
+)
+OVERVIEW_FILLER = {
+    "the", "a", "an", "of", "in", "india", "indian", "act", "law", "laws", "please", "me",
+    "briefly", "simply", "simple", "short", "to", "and", "is", "are", "it", "this",
+}
 
 load_dotenv()  # reads GROQ_API_KEY from .env
 
@@ -84,6 +143,87 @@ def exact_section_lookup(question, chunks):
     return [{**c, "distance": 0.0, "match_type": "exact_number"} for c in exact_matches]
 
 
+def detect_act_overview(question, chunks):
+    """
+    Returns a set of Act names if the question is a plain request to explain/summarise
+    a whole Act (e.g. "explain IT act", "what is the women rights act"), else None.
+    Specific questions ("what does the IT Act say about hacking?") are NOT treated as
+    overviews and use normal retrieval.
+    """
+    q = re.sub(r"[^a-z0-9 ]", " ", question.lower())
+    q = " ".join(q.split())
+
+    statute_names = {c["act_name"] for c in chunks if c.get("chunk_type") != "judgment"}
+
+    # candidate (phrase, matcher) pairs: manual aliases first, then real Act names
+    candidates = []
+    for alias in sorted(ACT_ALIASES, key=len, reverse=True):
+        key = ACT_ALIASES[alias]
+        names = {n for n in statute_names if key in n.lower()}
+        if names:
+            candidates.append((alias, names))
+    for name in sorted(statute_names, key=len, reverse=True):
+        short = re.sub(r",?\s*\d{4}$", "", name.lower())
+        short = " ".join(re.sub(r"[^a-z0-9 ]", " ", short).split())
+        candidates.append((short, {name}))
+
+    for phrase, names in candidates:
+        m = re.search(rf"\b{re.escape(phrase)}\b", q)
+        if not m:
+            continue
+        rest = (q[:m.start()] + " " + q[m.end():]).split()
+        intent = OVERVIEW_INTENT.match(q)
+        leftover = [w for w in rest if w not in OVERVIEW_FILLER and not (intent and w in intent.group(0).split())]
+        if not leftover:
+            return names
+    return None
+
+
+def act_overview_retrieve(question, act_names, index, chunks, embed_model, jurisdiction_filter=None):
+    allowed = set()
+    for i, c in enumerate(chunks):
+        if c["act_name"] not in act_names or c.get("chunk_type") == "judgment":
+            continue
+        if jurisdiction_filter and c.get("jurisdiction", "Central") not in ("Central", jurisdiction_filter):
+            continue
+        allowed.add(i)
+    if not allowed:
+        return []
+
+    picked = []  # (chunk index, distance)
+
+    # Anchor sections: short title and definitions orient the reader.
+    for i in sorted(allowed):
+        title = (chunks[i].get("title") or "").lower()
+        if "short title" in title or "definition" in title:
+            picked.append((i, 0.0))
+        if len(picked) >= 3:
+            break
+
+    # Then the sections most related to the Act's core provisions, within this Act only.
+    probe = embed_model.encode(
+        [f"{question}: main provisions, purpose, rights, duties, offences, penalties and remedies"],
+        convert_to_numpy=True,
+    )
+    distances, indices = index.search(probe.astype("float32"), index.ntotal)
+    already = {i for i, _ in picked}
+    for idx, dist in zip(indices[0], distances[0]):
+        if idx in allowed and idx not in already:
+            picked.append((int(idx), float(dist)))
+            already.add(int(idx))
+        if len(picked) >= OVERVIEW_TOP_K:
+            break
+
+    results = []
+    for i, dist in picked:
+        c = dict(chunks[i])
+        c["text"] = c["text"][:OVERVIEW_CHUNK_CHARS]
+        c["distance"] = dist
+        c["match_type"] = "act_overview"
+        results.append(c)
+    return results
+
+
 def retrieve(question, index, chunks, embed_model, top_k=TOP_K, jurisdiction_filter=None):
     """
     jurisdiction_filter: None (no filtering, default) or a state name (e.g. "Maharashtra").
@@ -95,6 +235,15 @@ def retrieve(question, index, chunks, embed_model, top_k=TOP_K, jurisdiction_fil
     # regardless of jurisdiction filter -- if the user named a specific section,
     # give it to them).
     exact = exact_section_lookup(question, chunks)
+
+    # "Explain the X Act": gather that Act's key sections instead of relying on one
+    # similarity search, which scores poorly for broad questions with no specific topic.
+    if not exact:
+        act_names = detect_act_overview(question, chunks)
+        if act_names:
+            overview = act_overview_retrieve(question, act_names, index, chunks, embed_model, jurisdiction_filter)
+            if overview:
+                return overview
 
     query_vector = embed_model.encode([question], convert_to_numpy=True)
     # Over-fetch candidates when a jurisdiction filter is active, since some
@@ -145,6 +294,16 @@ def build_prompt(question, retrieved_chunks):
             )
     context_text = "\n\n".join(context_blocks)
 
+    overview_note = ""
+    if any(c.get("match_type") == "act_overview" for c in retrieved_chunks):
+        overview_note = (
+            "- The user asked for an overview of an Act. The sources are a SELECTION of its key "
+            "sections, not the whole Act. Explain what the Act is for, who it protects or applies "
+            "to, and the main rights, duties, offences or remedies shown in the sources. Do not "
+            "claim anything about provisions not shown. End with one sentence saying this "
+            "overview is based on selected sections.\n"
+        )
+
     prompt = f"""You are a legal information assistant for Indian law. Answer the user's
 question using ONLY the information in the sources below. Do not use any
 outside knowledge or assumptions.
@@ -169,7 +328,7 @@ RULES:
 - NEVER use raw HTML tags like <br>, <b>, <div>. Use plain markdown only.
 - Keep the tone conversational and direct, not like a formal memo with a header for
   every sub-point.
-
+{overview_note}
 SOURCES:
 {context_text}
 

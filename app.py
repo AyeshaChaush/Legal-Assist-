@@ -1,5 +1,5 @@
 """
-Legal Assist+ : Streamlit UI Prototype (v2)
+Legal Assist+ : Streamlit UI (v3, with real authentication and encrypted storage)
 ------------------------------------------------
 Connects directly to your existing backend logic (analyze_document.py and
 query_legal_assist.py). This version adds: persistent chat history (saved to
@@ -25,6 +25,8 @@ import html
 from pathlib import Path
 
 import streamlit as st
+
+import security_utils as su
 
 from analyze_document import (
     extract_text_from_pdf,
@@ -54,6 +56,22 @@ from translation_utils import (
 # ---------------------------------------------------------
 st.set_page_config(page_title="Legal Assist+", page_icon="⚖️", layout="wide")
 
+
+@st.cache_resource
+def security_bootstrap():
+    """Runs once per server start: create tables, check keys, purge old uploads."""
+    su.init_db()
+    su._master_key()
+    su._jwt_secret()
+    return su.purge_expired()
+
+
+try:
+    security_bootstrap()
+except RuntimeError as e:
+    st.error(f"Security setup problem: {e}")
+    st.stop()
+
 RISK_COLORS = {
     "High": "#c0392b",
     "Medium": "#d97e2c",
@@ -62,7 +80,11 @@ RISK_COLORS = {
     "None": "#2e7d4f",
 }
 
-CHAT_HISTORY_FILE = Path("data/chat_history.json")
+NO_SOURCES_MESSAGE = (
+    "I couldn't find relevant sections in my legal sources for that question. "
+    "Try naming the Act or the specific topic, for example: 'What offences does the "
+    "Information Technology Act 2000 cover?'"
+)
 
 CUSTOM_CSS = """
 <style>
@@ -100,23 +122,22 @@ CUSTOM_CSS = """
 # PERSISTENT CHAT STORAGE (survives app restarts, unlike session_state alone)
 # ---------------------------------------------------------
 def load_chat_history():
-    if CHAT_HISTORY_FILE.exists():
-        try:
-            with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {"qa_history": [], "doc_qa_history": {}}
+    """Per-user, encrypted. Guests get an empty in-memory history."""
+    user = st.session_state.get("user")
+    if user:
+        return su.load_user_chat(user["id"])
     return {"qa_history": [], "doc_qa_history": {}}
 
 
 def save_chat_history():
-    CHAT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = {
+    """Persist only for logged-in users. Guest chats live in memory only."""
+    user = st.session_state.get("user")
+    if not user:
+        return
+    su.save_user_chat(user["id"], {
         "qa_history": st.session_state.qa_history,
         "doc_qa_history": st.session_state.doc_qa_history_by_doc,
-    }
-    with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    })
 
 
 def clean_answer_text(text):
@@ -172,8 +193,10 @@ if "doc_review_results" not in st.session_state:
     st.session_state.doc_review_results = []
 if "doc_missing_report" not in st.session_state:
     st.session_state.doc_missing_report = ""
-if "logged_in_as" not in st.session_state:
-    st.session_state.logged_in_as = None
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "token" not in st.session_state:
+    st.session_state.token = None
 
 
 def go_to(page_name):
@@ -186,6 +209,39 @@ def current_doc_qa_history():
         return []
     return st.session_state.doc_qa_history_by_doc.get(st.session_state.doc_name, [])
 
+
+def reset_doc_state():
+    st.session_state.doc_clauses = None
+    st.session_state.doc_embeddings = None
+    st.session_state.doc_name = None
+    st.session_state.doc_review_done = False
+    st.session_state.doc_review_results = []
+    st.session_state.doc_missing_report = ""
+
+
+def start_session(user):
+    """Called after a successful login: issue a JWT and load this user's chats."""
+    st.session_state.user = user
+    st.session_state.token = su.create_token(user)
+    saved = load_chat_history()
+    st.session_state.qa_history = saved["qa_history"]
+    st.session_state.doc_qa_history_by_doc = saved["doc_qa_history"]
+    reset_doc_state()
+
+
+def end_session():
+    """Logout / expiry / deletion: wipe everything user-specific from memory."""
+    st.session_state.user = None
+    st.session_state.token = None
+    st.session_state.qa_history = []
+    st.session_state.doc_qa_history_by_doc = {}
+    reset_doc_state()
+    st.session_state.page = "welcome"
+
+
+# Enforce JWT validity (8-hour expiry) on every interaction.
+if st.session_state.token and not su.verify_token(st.session_state.token):
+    end_session()
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -230,13 +286,29 @@ with st.sidebar:
     )
 
     st.divider()
-    if st.session_state.logged_in_as:
-        st.success(f"Signed in as **{st.session_state.logged_in_as}**")
+    user = st.session_state.user
+    if user:
+        st.success(f"Signed in as **{user['email']}**")
         if st.button("Log Out", use_container_width=True):
-            st.session_state.logged_in_as = None
+            end_session()
             st.rerun()
+        with st.expander("Privacy & my data"):
+            st.caption(
+                "Uploaded documents are encrypted (AES-256) and automatically "
+                f"deleted after {su.DEFAULT_RETENTION_DAYS} days. Your chat history is "
+                "stored encrypted and visible only to you."
+            )
+            confirm = st.checkbox(
+                "Permanently delete my account, documents and chats",
+                key="confirm_delete",
+            )
+            if st.button("Delete my account and data", disabled=not confirm, use_container_width=True):
+                su.delete_all_user_data(user["id"])
+                end_session()
+                st.rerun()
     else:
-        st.button("Login / Account", use_container_width=True, on_click=go_to, args=("welcome",))
+        st.caption("Guest mode: nothing is saved between sessions.")
+        st.button("Log In / Sign Up", use_container_width=True, on_click=go_to, args=("welcome",))
 
     if st.session_state.doc_name:
         st.info(f"Document loaded:\n**{st.session_state.doc_name}**")
@@ -259,6 +331,15 @@ with st.sidebar:
 # ---------------------------------------------------------
 # PAGE: WELCOME / LOGIN
 # ---------------------------------------------------------
+CONSENT_TEXT = (
+    "I consent to Legal Assist+ processing the questions and documents I submit in order "
+    "to provide this service. I understand that text from them is sent to a third-party "
+    "AI provider (Groq) to generate answers, that uploaded documents are stored encrypted "
+    f"and auto-deleted after {su.DEFAULT_RETENTION_DAYS} days, and that I can delete all my "
+    "data at any time (Digital Personal Data Protection Act, 2023)."
+)
+
+
 def render_welcome():
     st.markdown("<br>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -267,16 +348,52 @@ def render_welcome():
         st.markdown("##### Making Indian law accessible, one question at a time")
         st.markdown("<br>", unsafe_allow_html=True)
 
+        if st.session_state.user:
+            st.success(f"You are signed in as {st.session_state.user['email']}.")
+            st.button("Go to Home ->", type="primary", on_click=go_to, args=("home",))
+            return
+
         with st.container(border=True):
-            email = st.text_input("Email", placeholder="you@example.com", key="login_email")
-            st.text_input("Password", type="password", placeholder="********", key="login_password")
-            st.button("Log In", use_container_width=True, disabled=True)
-            st.caption("Full account system coming soon (Security phase, in progress)")
+            tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+
+            with tab_login:
+                with st.form("login_form"):
+                    email = st.text_input("Email", placeholder="you@example.com")
+                    password = st.text_input("Password", type="password")
+                    submitted = st.form_submit_button("Log In", use_container_width=True)
+                if submitted:
+                    user = su.authenticate(email, password)
+                    if user:
+                        start_session(user)
+                        go_to("home")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect email or password.")
+
+            with tab_signup:
+                with st.form("signup_form"):
+                    s_email = st.text_input("Email", placeholder="you@example.com", key="su_email")
+                    s_pw = st.text_input(
+                        f"Password (min {su.MIN_PASSWORD_LEN} characters)", type="password", key="su_pw"
+                    )
+                    s_pw2 = st.text_input("Confirm password", type="password", key="su_pw2")
+                    consent = st.checkbox(CONSENT_TEXT, key="su_consent")
+                    submitted = st.form_submit_button("Create Account", use_container_width=True)
+                if submitted:
+                    if s_pw != s_pw2:
+                        st.error("Passwords do not match.")
+                    else:
+                        ok, msg = su.register_user(s_email, s_pw, consent)
+                        (st.success if ok else st.error)(msg)
+
             st.divider()
             if st.button("Continue as Guest ->", use_container_width=True, type="primary"):
-                st.session_state.logged_in_as = "Guest"
                 go_to("home")
                 st.rerun()
+            st.caption(
+                "Guests can use every feature, but nothing is saved: chats and "
+                "documents disappear when you close the tab."
+            )
 
 
 # ---------------------------------------------------------
@@ -349,9 +466,12 @@ def render_qa():
 
                     jur = "Central" if st.session_state.jurisdiction_select.startswith("All India") else st.session_state.jurisdiction_select  # FIXED: was None, which skipped filtering entirely instead of restricting to Central-only
                     retrieved = retrieve_general_law(question_en, law_index, law_chunks, embed_model, jurisdiction_filter=jur)
-                    prompt = build_general_prompt(question_en, retrieved)
-                    raw_answer = ask_llm(prompt, groq_client, max_tokens=1500)
-                    answer_en = clean_answer_text(raw_answer)
+                    if retrieved:
+                        prompt = build_general_prompt(question_en, retrieved)
+                        raw_answer = ask_llm(prompt, groq_client, max_tokens=2500)
+                        answer_en = clean_answer_text(raw_answer)
+                    else:
+                        answer_en = NO_SOURCES_MESSAGE
 
                     # Translate the finished English answer into the user's chosen language.
                     answer = translate_from_english(answer_en, lang_code, groq_client)
@@ -385,9 +505,21 @@ def render_doc():
     st.markdown("# Analyze My Document")
     st.caption("Upload a contract or agreement. Legal Assist+ reviews it clause by clause.")
 
+    if st.session_state.user:
+        st.caption(
+            "Your upload is encrypted (AES-256) and auto-deleted after "
+            f"{su.DEFAULT_RETENTION_DAYS} days."
+        )
+    else:
+        st.caption("Guest mode: your document is processed in memory and never saved.")
+
     uploaded_file = st.file_uploader("Upload a PDF document", type=["pdf"])
 
     if uploaded_file and uploaded_file.name != st.session_state.doc_name:
+        file_bytes = uploaded_file.getvalue()
+        if st.session_state.user:
+            su.store_document(st.session_state.user["id"], uploaded_file.name, file_bytes)
+        uploaded_file.seek(0)
         with st.spinner("Extracting and splitting your document into clauses..."):
             raw_text = extract_text_from_pdf(uploaded_file)
             clauses = split_into_clauses(raw_text)
