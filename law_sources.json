@@ -1,0 +1,21 @@
+{
+  "allowed_hosts": ["indiacode.nic.in", "www.indiacode.nic.in"],
+  "delay_seconds": 5,
+  "acts": [
+    {
+      "id": "BNS_2023",
+      "name": "Bharatiya Nyaya Sanhita, 2023",
+      "pdf_url": "https://www.indiacode.nic.in/bitstream/123456789/20062/1/a202345.pdf"
+    },
+    {
+      "id": "BNSS_2023",
+      "name": "Bharatiya Nagarik Suraksha Sanhita, 2023",
+      "pdf_url": "https://indiacode.nic.in/bitstream/123456789/20099/3/A2023-46.pdf"
+    },
+    {
+      "id": "BSA_2023",
+      "name": "Bharatiya Sakshya Adhiniyam, 2023",
+      "pdf_url": "https://www.indiacode.nic.in/bitstream/123456789/20063/1/aa202347.pdf"
+    }
+  ]
+}
