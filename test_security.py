@@ -71,6 +71,20 @@ assert b"r1" not in next(Path("data/secure_uploads").rglob("*.review.enc")).read
 assert su.delete_document(ub["id"], d3)
 assert not list(Path("data/secure_uploads").rglob("*.review.enc"))   # review removed with its document
 
+# throttled periodic purge
+def _backdate(doc_id):
+    with sqlite3.connect(su.DB_PATH) as c:
+        c.execute("UPDATE documents SET uploaded_at=? WHERE id=?", (int(time.time()) - 10*86400, doc_id))
+d4 = su.store_document(ub["id"], "f.pdf", b"fourth"); _backdate(d4)
+su._last_purge = 0.0
+assert su.purge_if_due(7) == 1                         # first call purges
+d5 = su.store_document(ub["id"], "g.pdf", b"fifth"); _backdate(d5)
+assert su.purge_if_due(7) == 0                         # throttled within the hour
+assert any(d["id"] == d5 for d in su.list_documents(ub["id"]))
+su._last_purge = 0.0
+assert su.purge_if_due(7) == 1                         # due again
+assert not any(d["id"] == d5 for d in su.list_documents(ub["id"]))
+
 # chat + erasure
 su.save_user_chat(ua["id"], {"qa_history": [{"question": "q"}], "doc_qa_history": {}})
 assert su.load_user_chat(ua["id"])["qa_history"][0]["question"] == "q"

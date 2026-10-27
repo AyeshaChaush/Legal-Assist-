@@ -328,6 +328,22 @@ def purge_expired(retention_days: int = DEFAULT_RETENTION_DAYS) -> int:
     return len(rows)
 
 
+_last_purge = 0.0   # module-level, so it is shared by every session on this server
+
+
+def purge_if_due(retention_days: int = DEFAULT_RETENTION_DAYS, interval_seconds: int = 3600) -> int:
+    """
+    Runs purge_expired() at most once per interval. Safe to call on every page
+    interaction, so a long-running server still removes expired uploads.
+    """
+    global _last_purge
+    now = time.time()
+    if now - _last_purge < interval_seconds:
+        return 0
+    _last_purge = now
+    return purge_expired(retention_days)
+
+
 # ---------------------------------------------------------
 # LEDGER VERIFICATION
 # ---------------------------------------------------------

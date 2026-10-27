@@ -75,6 +75,8 @@ except RuntimeError as e:
     st.error(f"Security setup problem: {e}")
     st.stop()
 
+su.purge_if_due()   # removes expired uploads at most once an hour, even on a long-running server
+
 RISK_COLORS = {
     "High": "#c0392b",
     "Medium": "#d97e2c",
