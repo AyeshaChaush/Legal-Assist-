@@ -99,6 +99,7 @@ mupd = tmp / "manual_updates"
 cfgp = write_config([good])
 lf.write_bytes(b"%PDF-1.4 local v1")
 assert cl.check_local_file("T_ACT", lf, cfgp, mupd)["status"] == "BASELINE"
+assert (mupd / "baseline" / "T_ACT.pdf").read_bytes() == b"%PDF-1.4 local v1"   # baseline copy kept
 assert cl.check_local_file("T_ACT", lf, cfgp, mupd)["status"] == "UNCHANGED"
 lf.write_bytes(b"%PDF-1.4 local v2")
 r = cl.check_local_file("T_ACT", lf, cfgp, mupd)

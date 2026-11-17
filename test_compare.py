@@ -87,6 +87,41 @@ result, sections, stored2, warnings, out = cv.run("T", str(pdf), None, cfg, tmp 
 assert out.exists() and "Law comparison: T" in out.read_text(encoding="utf-8")
 assert len(sections) >= 4                                   # ASCII dash in the PDF: headings still found
 
+# PDF-vs-PDF mode: extraction noise cancels because both sides use the same pipeline
+def write_pdf(path, text):
+    cv_ = canvas.Canvas(str(path), pagesize=A4)
+    yy = 800
+    for ln in text.splitlines():
+        cv_.setFont("Helvetica", 10); cv_.drawString(40, yy, ln.replace("\u2014", "-")); yy -= 14
+        if yy < 60:
+            cv_.showPage(); yy = 800
+    cv_.save()
+
+TEXT2 = TEXT.replace("ordinary criminal jurisdiction", "revenue jurisdiction") \
+            .replace("4. Punishment.\n1\nCHAPTER I", "4. Punishment.\n5. Appeals.\n1\nCHAPTER I") \
+            .replace("4. Punishment.\u2014The punishment under this Act shall be rigorous.\n",
+                     "4. Punishment.\u2014The punishment under this Act shall be rigorous.\n"
+                     "5. Appeals.\u2014An appeal shall lie to the High Court.\n")
+pdf_old, pdf_new = tmp / "old.pdf", tmp / "new.pdf"
+write_pdf(pdf_old, TEXT); write_pdf(pdf_new, TEXT2)
+res2, secs2, ref2, w2, out2 = cv.run("T", str(pdf_new), None, cfg, tmp / "upd2", old_pdf=str(pdf_old))
+assert [n for n, _ in res2["changed"]] == ["2"], res2
+assert res2["new"] == ["5"] and res2["missing"] == [], res2
+assert res2["unchanged"] == ["1", "3", "3A", "4"], res2
+assert "previous PDF" in out2.read_text(encoding="utf-8")
+res3 = cv.run("T", str(pdf_old), None, cfg, tmp / "upd2", old_pdf=str(pdf_old))[0]
+assert not res3["changed"] and not res3["minor"] and not res3["new"] and not res3["missing"]   # same file: no noise at all
+
+# --vs-baseline uses data/law_updates/baseline/<ACT>.pdf, and says clearly when it is missing
+(tmp / "upd2" / "baseline").mkdir(parents=True, exist_ok=True)
+(tmp / "upd2" / "baseline" / "T.pdf").write_bytes(pdf_old.read_bytes())
+res4 = cv.run("T", str(pdf_new), None, cfg, tmp / "upd2", vs_baseline=True)[0]
+assert [n for n, _ in res4["changed"]] == ["2"]
+try:
+    cv.run("T", str(pdf_new), None, cfg, tmp / "no_such_dir", vs_baseline=True); raise AssertionError("should exit")
+except SystemExit as e:
+    assert "baseline" in str(e)
+
 # pending-file lookup
 (tmp / "upd" / "state.json").write_text(json.dumps({"T": {"pending_file": str(pdf)}}))
 assert cv.resolve_paths("T", None, None, cfg, tmp / "upd")[0] == str(pdf)

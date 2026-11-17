@@ -206,11 +206,11 @@ def compare(pdf_sections, stored, minor_below=0.995, changed_below=0.95):
 def build_report(act_id, pdf_path, json_path, result, pdf_sections, stored, warnings):
     by_num = {s["number"]: s for s in pdf_sections}
     L = [f"# Law comparison: {act_id}", "",
-         f"- PDF: `{pdf_path}`", f"- Stored JSON: `{json_path}`",
+         f"- PDF: `{pdf_path}`", f"- Compared against: `{json_path}`",
          f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}", "",
          "## Summary", "",
          f"- Sections found in PDF: {len(pdf_sections)}",
-         f"- Sections in stored JSON: {len(stored)}",
+         f"- Sections in reference: {len(stored)}",
          f"- Unchanged: {len(result['unchanged'])}",
          f"- Minor differences: {len(result['minor'])}",
          f"- Changed: {len(result['changed'])}",
@@ -236,14 +236,26 @@ def build_report(act_id, pdf_path, json_path, result, pdf_sections, stored, warn
 
 
 # ---------------------------------------------------------------- CLI
-def resolve_paths(act_id, pdf_arg, json_arg, config_path=CONFIG_PATH, updates_dir=UPDATES_DIR):
+def resolve_paths(act_id, pdf_arg, json_arg, config_path=CONFIG_PATH, updates_dir=UPDATES_DIR,
+                  old_pdf_arg=None, vs_baseline=False):
+    """Returns (pdf_path, reference_path, reference_kind) where kind is 'json' or 'pdf'."""
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     act = next((a for a in config["acts"] if a["id"] == act_id), None)
     if not act:
         raise SystemExit(f"No Act with id {act_id!r} in {config_path}")
-    json_path = json_arg or act.get("json_path")
-    if not json_path:
-        raise SystemExit("No stored JSON path: pass --json or add json_path for this Act in law_sources.json")
+
+    if old_pdf_arg or vs_baseline:
+        reference, kind = old_pdf_arg, "pdf"
+        if not reference:
+            reference = str(Path(updates_dir) / "baseline" / f"{act_id}.pdf")
+            if not Path(reference).is_file():
+                raise SystemExit(
+                    f"No saved baseline copy at {reference}. Copy your baseline PDF there first, "
+                    "or pass --old-pdf with its path.")
+    else:
+        reference, kind = json_arg or act.get("json_path"), "json"
+        if not reference:
+            raise SystemExit("No stored JSON path: pass --json or add json_path for this Act in law_sources.json")
     pdf_path = pdf_arg
     if not pdf_path:
         sp = Path(updates_dir) / "state.json"
@@ -251,19 +263,29 @@ def resolve_paths(act_id, pdf_arg, json_arg, config_path=CONFIG_PATH, updates_di
         pdf_path = state.get(act_id, {}).get("pending_file")
         if not pdf_path:
             raise SystemExit("No --pdf given and no pending file recorded for this Act.")
-    return pdf_path, json_path
+    return pdf_path, reference, kind
 
 
-def run(act_id, pdf_arg=None, json_arg=None, config_path=CONFIG_PATH, updates_dir=UPDATES_DIR):
-    pdf_path, json_path = resolve_paths(act_id, pdf_arg, json_arg, config_path, updates_dir)
+def run(act_id, pdf_arg=None, json_arg=None, config_path=CONFIG_PATH, updates_dir=UPDATES_DIR,
+        old_pdf=None, vs_baseline=False):
+    pdf_path, reference, kind = resolve_paths(act_id, pdf_arg, json_arg, config_path, updates_dir,
+                                              old_pdf, vs_baseline)
     if not Path(pdf_path).is_file():
         raise SystemExit(f"PDF not found: {pdf_path}")
-    if not Path(json_path).is_file():
-        raise SystemExit(f"Stored JSON not found: {json_path}")
+    if not Path(reference).is_file():
+        raise SystemExit(f"Reference file not found: {reference}")
     sections, warnings = split_sections(extract_text(pdf_path))
-    stored = load_stored(json_path)
+    if kind == "pdf":
+        # Same extraction on both sides, so PDF text-extraction noise cancels out.
+        old_sections, old_warnings = split_sections(extract_text(reference))
+        stored = {s["number"]: {"title": s["title"], "text": s["text"]} for s in old_sections}
+        warnings = warnings + [f"(reference PDF) {w}" for w in old_warnings]
+        label = f"{reference} (previous PDF)"
+    else:
+        stored = load_stored(reference)
+        label = f"{reference} (stored JSON)"
     result = compare(sections, stored)
-    report = build_report(act_id, pdf_path, json_path, result, sections, stored, warnings)
+    report = build_report(act_id, pdf_path, label, result, sections, stored, warnings)
     out_dir = Path(updates_dir) / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{act_id}_{time.strftime('%Y%m%d_%H%M%S')}.md"
@@ -276,11 +298,15 @@ def main():
     ap.add_argument("--act", required=True, help="Act id from law_sources.json, e.g. BNS_2023")
     ap.add_argument("--pdf", help="PDF to compare (default: the pending file for this Act)")
     ap.add_argument("--json", help="stored JSON (default: json_path in law_sources.json)")
+    ap.add_argument("--old-pdf", help="compare against a previous PDF instead of the JSON")
+    ap.add_argument("--vs-baseline", action="store_true",
+                    help="compare against the saved baseline PDF data/law_updates/baseline/<ACT>.pdf")
     args = ap.parse_args()
 
-    result, sections, stored, warnings, out = run(args.act, args.pdf, args.json)
+    result, sections, stored, warnings, out = run(
+        args.act, args.pdf, args.json, old_pdf=args.old_pdf, vs_baseline=args.vs_baseline)
     print(f"\nComparison for {args.act}\n" + "-" * 60)
-    print(f"Sections in PDF: {len(sections)}   in stored JSON: {len(stored)}")
+    print(f"Sections in PDF: {len(sections)}   in reference: {len(stored)}")
     print(f"Unchanged: {len(result['unchanged'])}   Minor differences: {len(result['minor'])}   "
           f"Changed: {len(result['changed'])}")
     print(f"New in PDF: {len(result['new'])}   Missing from PDF: {len(result['missing'])}   "

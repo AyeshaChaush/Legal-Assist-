@@ -143,6 +143,9 @@ def evaluate_pdf(act, data, etag, last_mod, prior, state, updates_dir, result):
 
     if not prior.get("sha256"):
         entry["last_changed"] = now_iso()
+        baseline_dir = Path(updates_dir) / "baseline"
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+        (baseline_dir / f"{act_id}.pdf").write_bytes(data)   # keep the reference copy itself
         result.update(status="BASELINE", detail=f"recorded reference fingerprint {digest[:12]}")
     elif prior["sha256"] == digest:
         result.update(status="UNCHANGED", detail=f"fingerprint {digest[:12]} matches")
