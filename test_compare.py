@@ -16,6 +16,7 @@ SECTIONS
 CHAPTER I
 PRELIMINARY
 1. Short title.—This Act may be called the Test Act, 2023.
+Of definitions
 2. Definitions.—In this Act, unless the context otherwise requires,—
 1. "court" means a court of ordinary criminal jurisdiction;
 2. "person" includes a company.
@@ -23,6 +24,8 @@ PRELIMINARY
 years.
 3A. Special offences.—Whoever does the prohibited act with a weapon shall be punished
 with imprisonment up to seven years.
+CHAPTER II
+OF PUNISHMENTS
 4. Punishment.—The punishment under this Act shall be rigorous.
 7
 THE SCHEDULE
@@ -36,6 +39,8 @@ assert secs[0]["title"] == "Short title"
 assert "Classification" not in secs[-1]["text"]           # schedule cut off the last section
 assert "7" not in secs[-1]["text"].split()[-1:]           # stray page number removed
 assert not warns, warns
+assert "Of definitions" not in secs[0]["text"]                       # trailing sub-heading trimmed
+assert "CHAPTER" not in secs[3]["text"] and "PUNISHMENTS" not in secs[3]["text"]   # banner trimmed
 
 # ---- stored JSON: section 2 differs, section 5 not in PDF, 3A not stored -------
 stored_rows = [
@@ -129,6 +134,50 @@ assert cv.resolve_paths("T", None, None, cfg, tmp / "upd")[0] == str(pdf)
 # garbage input is handled, not a crash
 s, w = cv.split_sections("this is not an Act at all")
 assert s == [] and w
+
+# ---- heading with no space after the number, and end matter after the last section -----
+TEXT_B = ("ARRANGEMENT OF SECTIONS\n1. A.\n2. B.\n3. C.\nCHAPTER I\n"
+          "1. A.—First.\n2.—B.—Second.\n3. C.—Third.\n"
+          "STATEMENT OF OBJECTS AND REASONS\nblah blah\n")
+sb, wb = cv.split_sections(TEXT_B)
+assert [s["number"] for s in sb] == ["1", "2", "3"], sb
+assert sb[1]["title"] == "B" and "blah" not in sb[2]["text"] and not wb, (sb, wb)
+
+# ---- stored JSON that starts text/title with the section number -------------------
+jp3 = tmp / "num.json"
+jp3.write_text(json.dumps([{"section_number": "3", "section_title": "3. Offences",
+                            "text": "3. Whoever does the prohibited act."}]), encoding="utf-8")
+st3 = cv.load_stored(jp3)
+assert st3["3"]["text"].startswith("Whoever") and st3["3"]["title"] == "Offences", st3
+
+# ---- abridged: stored text is a subset of the PDF text (missing proviso + illustration) -------
+core = "The court may do the thing in question. " * 6
+pdf_row = {"number": "9", "title": "T", "text": "T.—" + core +
+           "Provided that the court shall first hear the other side and record its reasons in writing "
+           "before it acts. Illustration. A sues B for a debt."}
+r_ab = cv.compare([pdf_row], {"9": {"title": "T", "text": core}})
+assert [n for n, _ in r_ab["abridged"]] == ["9"] and not r_ab["changed"], r_ab
+assert r_ab["abridged"][0][1] < 0.8
+r_same = cv.compare([pdf_row], {"9": {"title": "T", "text": pdf_row["text"][3:]}})
+assert r_same["unchanged"] == ["9"] and not r_same["abridged"], r_same
+
+# ---- diagonal watermark is ignored ----------------------------------------------
+def write_wm(path, watermark):
+    cc = canvas.Canvas(str(path), pagesize=A4)
+    cc.setFont("Helvetica", 10)
+    yy = 800
+    for k in range(40):
+        cc.drawString(40, yy, f"Line {k} of the section text goes right here for the test."); yy -= 14
+    if watermark:
+        cc.saveState(); cc.setFont("Helvetica", 40); cc.translate(120, 380); cc.rotate(45)
+        cc.drawString(0, 0, "IndiaCode"); cc.restoreState()
+    cc.save()
+plain, marked = tmp / "plain.pdf", tmp / "marked.pdf"
+write_wm(plain, False); write_wm(marked, True)
+import pdfplumber
+with pdfplumber.open(str(marked)) as pm, pdfplumber.open(str(plain)) as pp:
+    assert pm.pages[0].extract_text() != pp.pages[0].extract_text(), "test watermark did not disturb plain extraction"
+assert cv.extract_text(marked) == cv.extract_text(plain), "watermark letters leaked into the text"
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("ALL COMPARE TESTS PASSED")

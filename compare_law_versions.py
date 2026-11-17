@@ -35,19 +35,40 @@ from pathlib import Path
 CONFIG_PATH = Path("law_sources.json")
 UPDATES_DIR = Path("data/law_updates")
 
-HEAD_RE = re.compile(r"^\s*(\d{1,3}[A-Z]{0,2})\.\s+(\S.*)$")
+# "12. Title.-Text"  or  "255.-Title.-Text" (some Acts print no space after the number)
+HEAD_RE = re.compile(r"^\s*(\d{1,3}[A-Z]{0,2})\.(?:\s+|\s*[\u2014\u2013]\s*)(\S.*)$")
 PAGE_NUM_RE = re.compile(r"^\s*\d{1,3}\s*$")
-SCHEDULE_RE = re.compile(r"^\s*THE\s+(FIRST\s+)?SCHEDULE\b|^\s*SCHEDULE\b")
+# what follows the LAST section: schedules, statement of objects, memoranda
+SCHEDULE_RE = re.compile(
+    r"^\s*THE\s+(FIRST\s+)?SCHEDULE\b|^\s*SCHEDULE\b|STATEMENT OF OBJECTS|^\s*FINANCIAL MEMORANDUM")
+CHAPTER_RE = re.compile(r"^\s*(CHAPTER|PART)\s+[IVXLC]+\b")       # chapter / part banners
+SUBHEAD_RE = re.compile(r"^\s*Of\s+\S[^.]{0,100}$")               # e.g. "Of theft" (no full stop)
+LEADING_NUM_RE = re.compile(r"^\s*\d{1,3}[A-Z]{0,2}\.\s*")
 MAX_SKIP = 3            # tolerate up to this many missing numbers in a row (reported as warnings)
 
 
 # ---------------------------------------------------------------- PDF -> text
+def _keep_horizontal(obj):
+    """Drops rotated characters (the diagonal India Code watermark), keeps normal text."""
+    if obj.get("object_type") != "char":
+        return True
+    m = obj.get("matrix")
+    if not m:
+        return True
+    a, b = m[0], m[1]
+    return abs(b) <= 0.05 * max(abs(a), 1e-9)
+
+
 def extract_text(pdf_path):
     import pdfplumber
     pages = []
     with pdfplumber.open(str(pdf_path)) as pdf:
         for page in pdf.pages:
-            pages.append(page.extract_text() or "")
+            try:
+                text = page.filter(_keep_horizontal).extract_text()
+            except Exception:                       # fall back to plain extraction
+                text = page.extract_text()
+            pages.append(text or "")
     return "\n".join(pages)
 
 
@@ -109,13 +130,19 @@ def split_sections(text):
     for k, (i, num, rest) in enumerate(accepted):
         end = accepted[k + 1][0] if k + 1 < len(accepted) else len(lines)
         body = lines[i:end]
-        if k + 1 == len(accepted):          # last section: stop at the schedules
+        if k + 1 == len(accepted):          # last section: stop at schedules / statement of objects
             for j, ln in enumerate(body):
-                if j > 0 and SCHEDULE_RE.match(ln):
+                if j > 0 and SCHEDULE_RE.search(ln):
                     body = body[:j]
                     break
+        for j, ln in enumerate(body):       # chapter / part banners belong to the NEXT section
+            if j > 0 and CHAPTER_RE.match(ln):
+                body = body[:j]
+                break
+        while len(body) > 1 and SUBHEAD_RE.match(body[-1]):   # trailing "Of theft"-style headings
+            body.pop()
         body_text = "\n".join(body)
-        body_text = re.sub(rf"^\s*{re.escape(num)}\.\s+", "", body_text, count=1)
+        body_text = re.sub(rf"^\s*{re.escape(num)}\.(?:\s+|\s*[\u2014\u2013]\s*)", "", body_text, count=1)
         sections.append({"number": num, "title": _title_from(rest), "text": body_text})
     return sections, warnings
 
@@ -133,8 +160,8 @@ def load_stored(json_path):
         num = str(row.get("section_number", row.get("number", ""))).strip().rstrip(".")
         if not num:
             continue
-        title = (row.get("section_title") or row.get("title") or "").strip()
-        text = (row.get("text") or "").strip()
+        title = LEADING_NUM_RE.sub("", (row.get("section_title") or row.get("title") or "").strip(), count=1)
+        text = LEADING_NUM_RE.sub("", (row.get("text") or "").strip(), count=1)
         if num in stored:                       # duplicate entries for one number: join them
             stored[num]["text"] += "\n" + text
         else:
@@ -147,21 +174,34 @@ def _norm(s):
     return re.sub(r"[^a-z0-9]", "", s.lower().replace("­", ""))
 
 
-def similarity(stored_row, pdf_row):
-    """Best ratio of the PDF section against the stored text, with or without its title."""
+def similarity_detail(stored_row, pdf_row):
+    """
+    Returns (ratio, precision, recall) of the best match of the PDF section against the
+    stored text (with or without its title).
+      precision = share of the STORED text that is found in the PDF
+      recall    = share of the PDF text that is found in the stored text
+    Low recall with high precision means the stored text is missing content the PDF has.
+    """
     p = _norm(pdf_row["text"])        # already starts with the heading text (title included)
     candidates = [_norm(stored_row["text"]), _norm(stored_row["title"] + " " + stored_row["text"])]
-    best = 0.0
+    best = (0.0, 0.0, 0.0)
     for c in candidates:
         if c == p:
-            return 1.0
+            return (1.0, 1.0, 1.0)
         if not c or not p:
             continue
         sm = difflib.SequenceMatcher(None, c, p, autojunk=False)
-        if sm.real_quick_ratio() < best or sm.quick_ratio() < best:
+        if sm.real_quick_ratio() < best[0] or sm.quick_ratio() < best[0]:
             continue
-        best = max(best, sm.ratio())
+        matched = sum(b.size for b in sm.get_matching_blocks())
+        ratio = 2.0 * matched / (len(c) + len(p))
+        if ratio > best[0]:
+            best = (ratio, matched / len(c), matched / len(p))
     return best
+
+
+def similarity(stored_row, pdf_row):
+    return similarity_detail(stored_row, pdf_row)[0]
 
 
 def diff_snippet(stored_row, pdf_row, max_ops=3, width=140):
@@ -190,16 +230,19 @@ def compare(pdf_sections, stored, minor_below=0.995, changed_below=0.95):
     by_num = {s["number"]: s for s in pdf_sections}
     new = [n for n in _order(by_num) if n not in stored]
     missing = [n for n in _order(stored) if n not in by_num]
-    unchanged, minor, changed = [], [], []
+    unchanged, minor, changed, abridged = [], [], [], []
     for n in _order(n for n in by_num if n in stored):
-        r = similarity(stored[n], by_num[n])
+        r, precision, recall = similarity_detail(stored[n], by_num[n])
         if r >= minor_below:
             unchanged.append(n)
+        elif precision >= 0.95 and recall < 0.95:
+            abridged.append((n, recall))      # stored text is (almost) a subset of the PDF text
         elif r >= changed_below:
             minor.append((n, r))
         else:
             changed.append((n, r))
-    return {"new": new, "missing": missing, "unchanged": unchanged, "minor": minor, "changed": changed}
+    return {"new": new, "missing": missing, "unchanged": unchanged, "minor": minor,
+            "changed": changed, "abridged": abridged}
 
 
 # ---------------------------------------------------------------- report
@@ -214,10 +257,18 @@ def build_report(act_id, pdf_path, json_path, result, pdf_sections, stored, warn
          f"- Unchanged: {len(result['unchanged'])}",
          f"- Minor differences: {len(result['minor'])}",
          f"- Changed: {len(result['changed'])}",
+         f"- Stored text missing content (abridged): {len(result['abridged'])}",
          f"- New in PDF: {len(result['new'])}",
          f"- Missing from PDF: {len(result['missing'])}", ""]
     if warnings:
         L += ["## Splitter warnings", ""] + [f"- {w}" for w in warnings[:50]] + [""]
+    if result["abridged"]:
+        L += ["## Stored text is missing content that the PDF has (abridged)", "",
+              "Most likely provisos, explanations, illustrations or sub-clauses that were left out "
+              "of the stored text. Lowest coverage first.", ""]
+        for n, rec in sorted(result["abridged"], key=lambda x: x[1]):
+            L.append(f"### Section {n}: {by_num[n]['title']}  (stored text covers {rec:.0%} of the PDF text)")
+            L += [f"- {d}" for d in diff_snippet(stored[n], by_num[n], max_ops=2)] + [""]
     if result["changed"]:
         L += ["## Changed sections", ""]
         for n, r in result["changed"]:
@@ -308,7 +359,7 @@ def main():
     print(f"\nComparison for {args.act}\n" + "-" * 60)
     print(f"Sections in PDF: {len(sections)}   in reference: {len(stored)}")
     print(f"Unchanged: {len(result['unchanged'])}   Minor differences: {len(result['minor'])}   "
-          f"Changed: {len(result['changed'])}")
+          f"Changed: {len(result['changed'])}   Abridged: {len(result['abridged'])}")
     print(f"New in PDF: {len(result['new'])}   Missing from PDF: {len(result['missing'])}   "
           f"Splitter warnings: {len(warnings)}")
     print("-" * 60)
