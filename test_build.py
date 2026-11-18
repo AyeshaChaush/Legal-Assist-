@@ -28,4 +28,8 @@ assert nn is None and inf["problems"], inf
 nn, inf = b.rebuild(PDF_SECS[:2], OLD, force=True)
 assert nn is not None and [r["section_number"] for r in nn] == ["1", "2", "3"]          # extra JSON row kept untouched
 assert inf["kept"] == ["3"]
+assert [n for n, _ in info["odd_end"]] == [], info
+odd_pdf = [{"number": "1", "title": "T", "text": "T.\u2014Some words\nStray Heading Line"}]
+_, inf_odd = b.rebuild(odd_pdf, [{"section_number": "1", "title": "T", "text": "1. T.\u2014Some words"}])
+assert [n for n, _ in inf_odd["odd_end"]] == ["1"], inf_odd
 print("ALL BUILD TESTS PASSED")

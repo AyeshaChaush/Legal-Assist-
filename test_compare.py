@@ -135,6 +135,16 @@ assert cv.resolve_paths("T", None, None, cfg, tmp / "upd")[0] == str(pdf)
 s, w = cv.split_sections("this is not an Act at all")
 assert s == [] and w
 
+# ---- unpunctuated sub-heading at the end of a section is trimmed, real text is kept -------
+TEXT_C = ("ARRANGEMENT OF SECTIONS\n1. A.\n2. B.\n3. C.\n"
+          "1. A.\u2014First sentence.\n2. B.\u2014Second sentence ends here.\n"
+          "Judgments of Courts when relevant\n"
+          "3. C.\u2014Third sentence.\nIllustrations\n(a) A does a thing.\n")
+sc, wc = cv.split_sections(TEXT_C)
+assert sc[1]["text"].rstrip().endswith("ends here."), sc[1]
+assert "Judgments" not in sc[1]["text"] and not wc, (sc, wc)
+assert sc[2]["text"].rstrip().endswith("A does a thing."), sc[2]     # real last line kept
+
 # ---- heading with no space after the number, and end matter after the last section -----
 TEXT_B = ("ARRANGEMENT OF SECTIONS\n1. A.\n2. B.\n3. C.\nCHAPTER I\n"
           "1. A.—First.\n2.—B.—Second.\n3. C.—Third.\n"

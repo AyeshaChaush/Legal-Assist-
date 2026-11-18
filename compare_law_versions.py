@@ -43,6 +43,7 @@ SCHEDULE_RE = re.compile(
     r"^\s*THE\s+(FIRST\s+)?SCHEDULE\b|^\s*SCHEDULE\b|STATEMENT OF OBJECTS|^\s*FINANCIAL MEMORANDUM")
 CHAPTER_RE = re.compile(r"^\s*(CHAPTER|PART)\s+[IVXLC]+\b")       # chapter / part banners
 SUBHEAD_RE = re.compile(r"^\s*Of\s+\S[^.]{0,100}$")               # e.g. "Of theft" (no full stop)
+END_PUNCT = tuple(".;:,)\u2014-\"'\u201d\u2019]")
 LEADING_NUM_RE = re.compile(r"^\s*\d{1,3}[A-Z]{0,2}\.\s*")
 MAX_SKIP = 3            # tolerate up to this many missing numbers in a row (reported as warnings)
 
@@ -73,6 +74,12 @@ def extract_text(pdf_path):
 
 
 # ---------------------------------------------------------------- splitting
+def _looks_like_subheading(line):
+    t = line.strip()
+    return (0 < len(t) <= 110 and t[0].isalpha() and t[0].isupper()
+            and not t.endswith(END_PUNCT))
+
+
 def _successors(num):
     m = re.fullmatch(r"(\d+)([A-Z]*)", num)
     n, suf = int(m.group(1)), m.group(2)
@@ -140,6 +147,10 @@ def split_sections(text):
                 body = body[:j]
                 break
         while len(body) > 1 and SUBHEAD_RE.match(body[-1]):   # trailing "Of theft"-style headings
+            body.pop()
+        # trailing unpunctuated heading line, e.g. "Judgments of Courts when relevant"
+        while (len(body) > 1 and _looks_like_subheading(body[-1])
+               and body[-2].rstrip().endswith((".", ":", ";"))):
             body.pop()
         body_text = "\n".join(body)
         body_text = re.sub(rf"^\s*{re.escape(num)}\.(?:\s+|\s*[\u2014\u2013]\s*)", "", body_text, count=1)
