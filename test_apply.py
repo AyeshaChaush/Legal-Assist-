@@ -80,7 +80,9 @@ try:
         faiss.write_index(ix, "data/vector_db/legal_index.faiss")
         pickle.dump(chunks, open("data/vector_db/chunk_metadata.pkl", "wb"))
         return chunks
-    before_chunks = build_db(lambda c: f"{c['title']} {c['text']}")
+    RECIPE = lambda c: f"{c['act_name']} Section {c['number']}: {c['title']}. {c['text']}"   # same as build_vector_db.py
+    before_chunks = build_db(RECIPE)
+    stray = Path("data/statutes/cleaned/T.rebuilt.json"); stray.write_text("[]", encoding="utf-8")   # leftover from an earlier run
     snap = lambda: (Path("data/vector_db/legal_index.faiss").read_bytes(), Path("data/vector_db/chunk_metadata.pkl").read_bytes(), jp.read_bytes())
     original = snap()
 
@@ -88,7 +90,9 @@ try:
     # 1) preview changes nothing
     ap.main(args)
     assert snap() == original, "preview modified the app data"
-    assert Path("data/statutes/cleaned/T.rebuilt.json").exists()
+    assert not stray.exists(), "stray rebuilt file left in the statutes folder"
+    assert list(Path("data/statutes/cleaned").glob("*.json")) == [jp], "build_vector_db.py would index extra files"
+    assert Path("data/law_updates/rebuilt/T.rebuilt.json").exists()
 
     # 2) apply
     ap.main(args + ["--apply"])
@@ -98,10 +102,10 @@ try:
     assert "Provided that facts discovered" in ch[2]["text"] and ch[2]["act_name"] == ACT
     assert ch[1] == before_chunks[1] and ch[-1] == before_chunks[-1]        # other Act + judgment untouched
     assert ch[0]["text"] == before_chunks[0]["text"]                         # identical section untouched
-    old_ix_vecs = np.stack([fake_embed([f"{c['title']} {c['text']}"])[0] for c in before_chunks])
+    old_ix_vecs = np.stack([fake_embed([RECIPE(c)])[0] for c in before_chunks])
     new_vecs = ix.reconstruct_n(0, ix.ntotal)
     assert np.allclose(new_vecs[[0, 1, 3, 4]], old_ix_vecs[[0, 1, 3, 4]]), "unrelated vectors changed"
-    assert np.allclose(new_vecs[2], fake_embed([f"{ch[2]['title']} {ch[2]['text']}"])[0]), "new vector wrong"
+    assert np.allclose(new_vecs[2], fake_embed([RECIPE(ch[2])])[0]), "new vector wrong"
     assert not np.allclose(new_vecs[2], old_ix_vecs[2])
     assert "Provided that facts discovered" in json.loads(jp.read_text(encoding="utf-8"))[1]["text"]
     backups = list(Path("data/backups").iterdir()); assert len(backups) == 1
@@ -121,7 +125,7 @@ try:
     assert snap() == bad and len(list(Path("data/backups").iterdir())) == 1, "refused run still changed something"
 
     # 5) an index that does not contain the Act is refused
-    build_db(lambda c: f"{c['title']} {c['text']}")
+    build_db(RECIPE)
     chs = pickle.load(open("data/vector_db/chunk_metadata.pkl", "rb"))
     for c_ in chs:
         if c_["act_name"] == ACT: c_["act_name"] = "Renamed Act"

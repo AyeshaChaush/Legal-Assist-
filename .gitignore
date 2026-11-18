@@ -17,4 +17,5 @@ test/
 data/app.db
 data/secure_uploads/
 data/user_chats/
-data/law_updates/
+data/law_updates/data/backups/
+data/law_updates/rebuilt/

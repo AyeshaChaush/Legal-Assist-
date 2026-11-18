@@ -8,7 +8,7 @@ full PDF text. Everything else in each row (title, chapter, ids, any other field
 
 SAFETY
   * It NEVER overwrites your existing JSON. The output goes to a new file (default:
-    <name>.rebuilt.json next to the original). It refuses to write over the input.
+    data/law_updates/rebuilt/<name>.rebuilt.json, deliberately NOT in data/statutes/cleaned). It refuses to write over the input.
   * It refuses to run if the section count or numbering does not line up (override: --force).
   * It writes a report listing every section whose text changed, so a human can review.
   * It does not touch the vector database. Rebuilding that is a separate, approved step.
@@ -115,6 +115,11 @@ def make_report(act_id, pdf_path, in_path, out_path, info, data, new_data):
     return "\n".join(L)
 
 
+def default_out_path(in_path):
+    """Rebuilt files go OUTSIDE data/statutes/cleaned, because build_vector_db.py indexes every *.json in that folder."""
+    return Path(cv.UPDATES_DIR) / "rebuilt" / (Path(in_path).stem + ".rebuilt.json")
+
+
 def run_rebuild(act_id, pdf_path, in_path, out_path, force=False):
     """Splits the PDF, rebuilds the sections, writes <out_path> and a report. Returns (data, new_data, info, report_path)."""
     in_path, out_path = Path(in_path), Path(out_path)
@@ -127,6 +132,7 @@ def run_rebuild(act_id, pdf_path, in_path, out_path, force=False):
     new_data, info = rebuild(sections, data, force=force)
     if new_data is None:
         raise SystemExit("Stopping, nothing written:\n  " + "\n  ".join(info["problems"]))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(new_data, ensure_ascii=False, indent=2), encoding="utf-8")
     rep_dir = Path(cv.UPDATES_DIR) / "reports"
     rep_dir.mkdir(parents=True, exist_ok=True)
@@ -153,7 +159,7 @@ def main():
     a = ap.parse_args()
 
     in_path = Path(a.json or default_json_path(a.act))
-    out_path = Path(a.out) if a.out else in_path.with_name(in_path.stem + ".rebuilt.json")
+    out_path = Path(a.out) if a.out else default_out_path(in_path)
     data, new_data, info, rep = run_rebuild(a.act, a.pdf, in_path, out_path, force=a.force)
     print(f"\nRebuild for {a.act}\n" + "-" * 60)
     print(f"Identical: {len(info['same'])}   Gained content: {len(info['grew'])}   "

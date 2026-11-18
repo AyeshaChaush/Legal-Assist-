@@ -46,6 +46,9 @@ def _f(c, k):
 
 
 TEMPLATES = [
+    # the exact recipe used by build_vector_db.py (generate_embeddings); the rest are fallbacks
+    ("act Section N: title. text",
+     lambda c: f"{_f(c, 'act_name')} Section {_f(c, 'number')}: {_f(c, 'title')}. {_f(c, 'text')}"),
     ("text only", lambda c: _f(c, "text")),
     ("title + text", lambda c: f"{_f(c, 'title')} {_f(c, 'text')}"),
     ("title, newline, text", lambda c: f"{_f(c, 'title')}\n{_f(c, 'text')}"),
@@ -158,7 +161,14 @@ def main(argv=None):
     import faiss
 
     json_path = Path(a.json or bsj.default_json_path(a.act))
-    rebuilt_path = json_path.with_name(json_path.stem + ".rebuilt.json")
+    rebuilt_path = bsj.default_out_path(json_path)
+    # build_vector_db.py indexes EVERY *.json in the statutes folder, so stray rebuilt copies
+    # there would be indexed twice. Move any such file out (moved, never deleted).
+    for stray in sorted(json_path.parent.glob("*.rebuilt.json")):
+        dest = rebuilt_path.parent / stray.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(stray, dest)
+        print(f"Moved {stray} -> {dest} (it must not sit in the statutes folder).")
     old_data, new_data, info, report = bsj.run_rebuild(a.act, a.pdf, json_path, rebuilt_path)
     old_rows, new_rows = bsj._rows(old_data)[0], bsj._rows(new_data)[0]
 
